@@ -143,6 +143,3 @@ Thumbs.db
 
 # Container build context
 .dockerignore
-
-copilot/
-images/
