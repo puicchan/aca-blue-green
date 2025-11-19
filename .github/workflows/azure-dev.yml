@@ -1,0 +1,228 @@
+name: Azure Container Apps Blue-Green Deployment
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Get commit short SHA
+      id: commit
+      run: echo "short-sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+    - name: Install azd
+      uses: Azure/setup-azd@v2
+
+    - name: Log in with Azure (Federated Credentials)
+      if: ${{ env.AZURE_CLIENT_ID != '' }}
+      run: |
+        azd auth login `
+          --client-id "$Env:AZURE_CLIENT_ID" `
+          --federated-credential-provider "github" `
+          --tenant-id "$Env:AZURE_TENANT_ID"
+      shell: pwsh
+
+    - name: Log in with Azure (Client Credentials)
+      if: ${{ env.AZURE_CLIENT_ID == '' }}
+      run: |
+        azd auth login `
+          --client-id "$Env:AZURE_CLIENT_ID" `
+          --client-secret "$Env:AZURE_CLIENT_SECRET" `
+          --tenant-id "$Env:AZURE_TENANT_ID"
+      shell: pwsh
+      env:
+        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+    - name: Provision Infrastructure (First Run)
+      id: provision
+      run: |
+        # Login to Azure CLI first to check if infrastructure exists
+        az login --service-principal -u ${{ vars.AZURE_CLIENT_ID }} -t ${{ vars.AZURE_TENANT_ID }} --federated-token $(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+        az account set --subscription ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        
+        # Check if container app exists (not just resource group)
+        RG_EXISTS=$(az group exists --name rg-${{ env.AZURE_ENV_NAME }})
+        echo "Resource group exists: $RG_EXISTS"
+        
+        if [ "$RG_EXISTS" = "true" ]; then
+          # Check if container app exists within the resource group
+          CONTAINER_APP_EXISTS=$(az containerapp show --name web --resource-group rg-${{ env.AZURE_ENV_NAME }} 2>/dev/null && echo "true" || echo "false")
+          echo "Container app exists: $CONTAINER_APP_EXISTS"
+        else
+          CONTAINER_APP_EXISTS="false"
+        fi
+        
+        if [ "$CONTAINER_APP_EXISTS" = "true" ]; then
+          echo "first_run=false" >> $GITHUB_OUTPUT
+          echo "♻️ Infrastructure exists - proceeding with blue-green deployment"
+          
+          # Refresh environment from Azure (only if it exists)
+          azd env refresh ${{ vars.AZURE_ENV_NAME }} --no-prompt
+          azd env get-values
+        else
+          echo "first_run=true" >> $GITHUB_OUTPUT
+          echo "🆕 First deployment - provisioning infrastructure with blue revision"
+          
+          # Create new azd environment for first deployment
+          azd env new ${{ env.AZURE_ENV_NAME }} --location westus --subscription ${{ vars.AZURE_SUBSCRIPTION_ID }} --no-prompt
+          
+          # Set required environment variables for first deployment
+          azd env set BLUE_COMMIT_ID "v1.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set LATEST_COMMIT_ID "v1.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set PRODUCTION_LABEL "blue"
+          
+          echo "📋 Environment variables before azd up:"
+          azd env get-values
+          
+          # Run up (provision + deploy) - same as local testing
+          azd up --no-prompt
+          
+          APP_URL=$(azd env get-values | grep SERVICE_WEB_URI | cut -d'=' -f2 | tr -d '"')
+          echo "✅ Blue revision deployed as initial production: $APP_URL"
+        fi
+      shell: bash
+
+    - name: Determine Current Production and Deploy New Revision
+      if: steps.provision.outputs.first_run == 'false'
+      id: deploy_new
+      run: |
+        # Display all environment variables
+        echo "📋 Current environment variables:"
+        azd env get-values
+        echo "---"
+        
+        # Get current production label
+        CURRENT_PROD=$(azd env get-values | grep PRODUCTION_LABEL | cut -d'=' -f2 | tr -d '"')
+        echo "Current production: $CURRENT_PROD"
+        
+        # Determine target color (opposite of current production)
+        if [ "$CURRENT_PROD" = "blue" ]; then
+          TARGET_COLOR="green"
+          TARGET_VERSION="v2.0"
+          echo "🟢 Deploying GREEN revision (blue is current production)"
+          
+          # Keep existing blue commit ID
+          BLUE_COMMIT_ID=$(azd env get-values | grep BLUE_COMMIT_ID | cut -d'=' -f2 | tr -d '"')
+          azd env set BLUE_COMMIT_ID "$BLUE_COMMIT_ID"
+          
+          # Set green as new revision
+          azd env set GREEN_COMMIT_ID "v2.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set LATEST_COMMIT_ID "v2.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set PRODUCTION_LABEL "blue"  # Keep blue as production for now
+        else
+          TARGET_COLOR="blue"
+          TARGET_VERSION="v1.0"
+          echo "🔵 Deploying BLUE revision (green is current production)"
+          
+          # Keep existing green commit ID
+          GREEN_COMMIT_ID=$(azd env get-values | grep GREEN_COMMIT_ID | cut -d'=' -f2 | tr -d '"')
+          azd env set GREEN_COMMIT_ID "$GREEN_COMMIT_ID"
+          
+          # Set blue as new revision
+          azd env set BLUE_COMMIT_ID "v1.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set LATEST_COMMIT_ID "v1.0-${{ steps.commit.outputs.short-sha }}"
+          azd env set PRODUCTION_LABEL "green"  # Keep green as production for now
+        fi
+        
+        echo "target_color=$TARGET_COLOR" >> $GITHUB_OUTPUT
+        echo "current_prod=$CURRENT_PROD" >> $GITHUB_OUTPUT
+        
+        echo "📋 Environment variables set:"
+        azd env get-values | grep -E "COMMIT_ID|PRODUCTION_LABEL"
+        
+        # Package and deploy the new revision
+        echo "🚀 Starting package and deployment..."
+        azd package --no-prompt
+        azd deploy --no-prompt
+        
+        echo "✅ Deployment completed successfully"
+        
+        # Get app URLs
+        echo "📋 Getting app URL..."
+        azd env get-values | grep SERVICE_WEB_URI || echo "No SERVICE_WEB_URI found"
+        
+        APP_URL=$(azd env get-values | grep SERVICE_WEB_URI | cut -d'=' -f2 | tr -d '"' || echo "")
+        
+        if [ -z "$APP_URL" ]; then
+          echo "❌ Could not get SERVICE_WEB_URI from environment"
+          azd env get-values
+          exit 1
+        fi
+        
+        echo "App URL: $APP_URL"
+        
+        DOMAIN=$(echo "$APP_URL" | sed 's|https://||' | cut -d'/' -f1)
+        BASE_DOMAIN=$(echo "$DOMAIN" | cut -d'.' -f2-)
+        APP_NAME=$(echo "$DOMAIN" | cut -d'.' -f1)
+        
+        TARGET_URL="https://$APP_NAME---$TARGET_COLOR.$BASE_DOMAIN"
+        echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
+        
+        echo "✅ $TARGET_COLOR revision deployed: $TARGET_URL"
+      shell: bash
+
+    - name: Test New Revision
+      if: steps.provision.outputs.first_run == 'false'
+      run: |
+        TARGET_URL="${{ steps.deploy_new.outputs.target_url }}"
+        TARGET_COLOR="${{ steps.deploy_new.outputs.target_color }}"
+        
+        echo "Testing $TARGET_COLOR revision at: $TARGET_URL/health"
+        
+        # Health check
+        if ! curl -f "$TARGET_URL/health"; then
+          echo "❌ Health check failed for $TARGET_COLOR revision"
+          exit 1
+        fi
+        
+        echo "✅ $TARGET_COLOR revision health check passed"
+        
+        # Additional validation
+        RESPONSE=$(curl -s "$TARGET_URL/api/info")
+        echo "Response from $TARGET_COLOR: $RESPONSE"
+      shell: bash
+
+    - name: Switch Production Traffic to New Revision
+      if: steps.provision.outputs.first_run == 'false'
+      run: |
+        TARGET_COLOR="${{ steps.deploy_new.outputs.target_color }}"
+        
+        echo "🔄 Switching production traffic to $TARGET_COLOR..."
+        
+        # Switch production label
+        azd env set PRODUCTION_LABEL "$TARGET_COLOR"
+        azd deploy --no-prompt
+        
+        # Verify production traffic
+        APP_URL=$(azd env get-values | grep SERVICE_WEB_URI | cut -d'=' -f2 | tr -d '"')
+        
+        echo "✅ Production traffic switched to $TARGET_COLOR"
+        echo "Production URL: $APP_URL"
+        
+        # Final verification
+        curl -f "$APP_URL/health" || exit 1
+        RESPONSE=$(curl -s "$APP_URL/api/info")
+        echo "Production is now serving $TARGET_COLOR: $RESPONSE"
+      shell: bash
+
+# Note: For rollback, manually run this workflow or use Azure CLI to switch PRODUCTION_LABEL back

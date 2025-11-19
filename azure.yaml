@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: aca-blue-green-demo
+metadata:
+  template: aca-blue-green-demo@0.0.1-beta
+
+# Custom up workflow to ensure role assignments propagate before deployment
+workflows:
+  up:
+    steps:
+      - azd: provision
+      - azd: deploy --all
+
+# Define the services
+services:
+  web:
+    project: .
+    language: python
+    host: containerapp
+    docker:
+      image: aca-blue-green/svc 
+      tag: web-${LATEST_COMMIT_ID}
+    

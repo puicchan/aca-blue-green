@@ -1,0 +1,126 @@
+name: Rollback to Previous Revision
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_revision:
+        description: 'Target revision label to rollback to (blue or green)'
+        required: true
+        type: choice
+        options:
+          - blue
+          - green
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install azd
+      uses: Azure/setup-azd@v1.0.0
+
+    - name: Install Azure CLI
+      uses: azure/login@v2
+      with:
+        client-id: ${{ env.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Log in with Azure (azd)
+      run: |
+        azd auth login \
+          --client-id "$Env:AZURE_CLIENT_ID" \
+          --federated-credential-provider "github" \
+          --tenant-id "$Env:AZURE_TENANT_ID"
+      shell: pwsh
+
+    - name: Rollback Traffic
+      run: |
+        # Get resource group name from azd convention
+        RESOURCE_GROUP="rg-${{ env.AZURE_ENV_NAME }}"
+        APP_NAME="web"
+        TARGET_LABEL="${{ inputs.target_revision }}"
+        
+        echo "Rolling back to: $TARGET_LABEL"
+        echo "Resource Group: $RESOURCE_GROUP"
+        
+        # Get current traffic distribution
+        echo "Current traffic distribution:"
+        az containerapp revision list \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --query "[?properties.active].{Revision:name, Traffic:properties.trafficWeight, Label:properties.label}" \
+          -o table
+        
+        # Get the revision name for the target label
+        TARGET_REVISION=$(az containerapp revision list \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --query "[?properties.active && properties.label=='$TARGET_LABEL'].name" \
+          -o tsv)
+        
+        if [ -z "$TARGET_REVISION" ]; then
+          echo "Error: No active revision found with label '$TARGET_LABEL'"
+          exit 1
+        fi
+        
+        echo "Target revision: $TARGET_REVISION"
+        
+        # Get the container image from the target revision
+        TARGET_IMAGE=$(az containerapp revision show \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --revision $TARGET_REVISION \
+          --query "properties.template.containers[0].image" \
+          -o tsv)
+        
+        echo "Target image: $TARGET_IMAGE"
+        
+        # Update azd environment to switch traffic
+        azd env select ${{ env.AZURE_ENV_NAME }}
+        
+        # Get current commit IDs from azd environment
+        BLUE_COMMIT=$(azd env get-values | grep BLUE_COMMIT_ID | cut -d'=' -f2 | tr -d '"')
+        GREEN_COMMIT=$(azd env get-values | grep GREEN_COMMIT_ID | cut -d'=' -f2 | tr -d '"')
+        
+        # Set production label and deploy with target image
+        azd env set BLUE_COMMIT_ID "$BLUE_COMMIT"
+        azd env set GREEN_COMMIT_ID "$GREEN_COMMIT"
+        azd env set PRODUCTION_LABEL "$TARGET_LABEL"
+        
+        echo "Switching traffic to $TARGET_LABEL revision..."
+        azd deploy web --from-package "$TARGET_IMAGE" --no-prompt
+        
+        echo "✅ Rollback complete!"
+        
+        # Show final traffic distribution
+        echo "Final traffic distribution:"
+        az containerapp revision list \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --query "[?properties.active].{Revision:name, Traffic:properties.trafficWeight, Label:properties.label}" \
+          -o table
+        
+        # Get app URL
+        APP_URL=$(azd env get-values | grep SERVICE_WEB_URI | cut -d'=' -f2 | tr -d '"')
+        echo "Application URL: $APP_URL"
+        
+        # Verify rollback
+        echo "Verifying rollback..."
+        curl -f "$APP_URL/health" || exit 1
+        echo "Health check passed!"
+      shell: bash

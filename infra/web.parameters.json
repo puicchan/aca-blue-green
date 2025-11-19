@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { 
+      "value": "${AZURE_ENV_NAME}" 
+    },
+    "location": { 
+      "value": "${AZURE_LOCATION}" 
+    },
+    "containerRegistryName": { 
+      "value": "${AZURE_CONTAINER_REGISTRY_NAME}" 
+    },
+    "containerAppsEnvironmentName": { 
+      "value": "${AZURE_CONTAINER_APPS_ENVIRONMENT_NAME}" 
+    },
+    "imageName": { 
+      "value": "${SERVICE_WEB_IMAGE_NAME}" 
+    },
+    "identityId": {
+      "value": "${SERVICE_WEB_IDENTITY_ID}"
+    },
+    "blueCommitId": { 
+      "value": "${BLUE_COMMIT_ID}" 
+    },
+    "greenCommitId": { 
+      "value": "${GREEN_COMMIT_ID}" 
+    },
+    "latestCommitId": { 
+      "value": "${LATEST_COMMIT_ID}" 
+    },
+    "productionLabel": { 
+      "value": "${PRODUCTION_LABEL=blue}" 
+    }
+  }
+}
