@@ -126,3 +126,7 @@ resource webApp 'Microsoft.App/containerApps@2025-02-02-preview' = {
 output SERVICE_WEB_NAME string = webApp.name
 output SERVICE_WEB_URI string = 'https://${webApp.properties.configuration.ingress.fqdn}'
 output latestRevisionName string = webApp.properties.latestReadyRevisionName
+output PRODUCTION_LABEL string = productionLabel
+output BLUE_COMMIT_ID string = blueCommitId
+output GREEN_COMMIT_ID string = greenCommitId
+output LATEST_COMMIT_ID string = latestCommitId
