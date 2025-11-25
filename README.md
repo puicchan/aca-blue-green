@@ -8,9 +8,8 @@ Run locally:
     ```
 3. Run `azd up`
    
-4. Deploy Green 
+4. Deploy Green, but keeping traffic on BLUE 
     ```
-    azd env set BLUE_COMMIT_ID fb699ef
     azd env set GREEN_COMMIT_ID c6f1515
     azd env set LATEST_COMMIT_ID c6f1515
     azd env set PRODUCTION_LABEL blue
@@ -20,7 +19,7 @@ Run locally:
 
     To test
     ```powershell
-    $uri = azd env get-values | Select-String "SERVICE_WEB_URI" | ForEach-Object { $_.Line.Split('=')[1].Trim('"') }; $domain = ([System.Uri]$uri).Host.Split('.', 2)[1]; Write-Host "Production FQDN: $uri"; Write-Host "Blue label FQDN: https://web---blue.$domain"; Write-Host "Green label FQDN: https://web---green.$domain"
+    $uri = azd env get-value | Select-String "SERVICE_WEB_URI"; $domain = ([System.Uri]$uri).Host.Split('.', 2)[1]; Write-Host "Production FQDN: $uri"; Write-Host "Blue label FQDN: https://web---blue.$domain"; Write-Host "Green label FQDN: https://web---green.$domain"
     ```
     
     See traffic:
