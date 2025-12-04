@@ -27,8 +27,6 @@ jobs:
 
     - name: Install azd
       uses: Azure/setup-azd@v2
-      with:
-        version: 1.21.1
 
     - name: Log in with Azure (Federated Credentials)
       if: ${{ env.AZURE_CLIENT_ID != '' }}

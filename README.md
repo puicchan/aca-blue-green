@@ -19,7 +19,7 @@ Run locally:
 
     To test
     ```powershell
-    $uri = azd env get-value | Select-String "SERVICE_WEB_URI"; $domain = ([System.Uri]$uri).Host.Split('.', 2)[1]; Write-Host "Production FQDN: $uri"; Write-Host "Blue label FQDN: https://web---blue.$domain"; Write-Host "Green label FQDN: https://web---green.$domain"
+    $uri = azd env get-value "SERVICE_WEB_URI"; $domain = ([System.Uri]$uri).Host.Split('.', 2)[1]; Write-Host "Production FQDN: $uri"; Write-Host "Blue label FQDN: https://web---blue.$domain"; Write-Host "Green label FQDN: https://web---green.$domain"
     ```
     
     See traffic:
